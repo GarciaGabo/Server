@@ -1,6 +1,7 @@
 import mysql from 'mysql2';
 import dotenv from 'dotenv';
 import fs from "fs";
+import bcrypt from "bcrypt";
 dotenv.config();
 
 const pool = mysql
@@ -15,9 +16,10 @@ const pool = mysql
 export async function InsertUser(nombre,apellidos,domicilio,clave_electoral,contraseña) {
     try {
         await pool.query(`START TRANSACTION`);
+        const encrypt_password = await bcrypt.hash(contraseña,10);
         const [result] = await pool.query(
             `INSERT INTO usuarios(nombre,apellidos,domicilio,clave_electoral,contraseña) VALUES (?, ?, ?, ?, ?)`,
-            [nombre,apellidos,domicilio,clave_electoral,contraseña]
+            [nombre,apellidos,domicilio,clave_electoral,encrypt_password]
         );
         await pool.query('COMMIT');
         const id = result.insertId;
@@ -25,6 +27,18 @@ export async function InsertUser(nombre,apellidos,domicilio,clave_electoral,cont
     } catch (error) {
         await pool.query('ROLLBACK');
         console.error("Error al insertar usuario:", error);
+    }
+}
+export async function InsertPhoto(foto){
+    try {
+        const [nombre_foto, extension] = foto.split('.');
+        
+        const [result] = await pool.query(
+            `UPDATE usuarios SET foto = ? WHERE clave_electoral = ?`,
+            [foto, nombre_foto]
+        );
+    } catch (error) {
+        console.error(error);
     }
 }
 export async function getClaveUsuario(clave_electoral) {
@@ -62,9 +76,8 @@ export async function getClaveUsuarioUnico(id_usuario,clave_electoral) {
 
 export async function getUsers(){
     try{
-        const [row] = await pool.query(`SELECT usuarios.*, vehiculo.*
-        FROM usuarios
-        JOIN vehiculo ON usuarios.id_usuario = vehiculo.id_usuario;
+        const [row] = await pool.query(`SELECT *
+        FROM usuarios;
         `);
         return row;
     }
@@ -199,9 +212,10 @@ export async function getPlaca_NoSerie(placa,no_serie){
 //Querys Tabla de Administradores
 export async function InsertAdmin(tipo_usuario,nombre,apellidos,domicilio,clave_electoral_pri,contrasena){
     try {
+        const contraseña_encriptada = await bcrypt.hash(contrasena, 10)
         const [result] = await pool.query(
             `INSERT INTO usuario_pri (tipo_usuario,nombre,apellidos,domicilio,clave_electoral_pri,contrasena) VALUES(?,?,?,?,?,?)`,
-            [tipo_usuario,nombre,apellidos,domicilio,clave_electoral_pri,contrasena]
+            [tipo_usuario,nombre,apellidos,domicilio,clave_electoral_pri,contraseña_encriptada]
         );
     } catch(error) {
         
@@ -266,9 +280,10 @@ export async function deleteAdmins(id_usuario_p) {
 
 export async function UpdateAdmins(id_usuario_pri, tipo_usuario, nombre, apellidos, domicilio, clave_electoral_pri, contrasena) {
     try {
+        const encrypt_password = await bcrypt.hash(contrasena,10);
         const [result] = await pool.query(
             `UPDATE usuario_pri SET tipo_usuario=?, nombre=?, apellidos=?, domicilio=?, clave_electoral_pri=?, contrasena=? WHERE id_usuario_p=?`,
-            [tipo_usuario, nombre, apellidos, domicilio, clave_electoral_pri, contrasena, id_usuario_pri]
+            [tipo_usuario, nombre, apellidos, domicilio, clave_electoral_pri, encrypt_password, id_usuario_pri]
         );
         return result;
     } catch (error) {
@@ -292,21 +307,30 @@ export async function InsertQr(idVehicle,rutaCodigoQR) {
 }
 
 export async function deleteQr(id_usuario){
-    try{
+    try {
         const [result0] = await pool.query(`SELECT qr FROM qr WHERE id_vehiculo IN (SELECT id_vehiculo FROM vehiculo WHERE id_usuario = ?);`, [id_usuario]);
-        if (result0.length > 0) {
-            const rutaArchivoQR = result0[0].qr;
-            fs.unlinkSync(rutaArchivoQR);
-        }
-        const [result] = await pool.query(`DELETE FROM qr WHERE id_vehiculo IN (SELECT id_vehiculo FROM vehiculo WHERE id_usuario = ?);`,
-        [id_usuario]);
+        
+        // Obtener todas las rutas de las imágenes encontradas
+        const rutasArchivosQR = result0.map(row => row.qr);
+        
+        // Eliminar cada archivo encontrado
+        rutasArchivosQR.forEach(rutaArchivoQR => {
+            try {
+                fs.unlinkSync(rutaArchivoQR);
+            } catch (error) {
+                console.error("Error al eliminar la imagen:", error);
+            }
+        });
+
+        const [result] = await pool.query(`DELETE FROM qr WHERE id_vehiculo IN (SELECT id_vehiculo FROM vehiculo WHERE id_usuario = ?);`, [id_usuario]);
         await pool.query('COMMIT');
         return result;
-    }catch(error){
+    } catch(error) {
         await pool.query('ROLLBACK');
         console.error("Error al eliminar el vehiculo:", error);
     }
 }
+
 export async function IdQr(id_vehiculo){
     try {
         const [result] = await pool.query(
@@ -328,9 +352,10 @@ export async function IdQr(id_vehiculo){
 export async function updateUsuario(id_usuario, nombre, apellidos, domicilio, clave_electoral, contraseña) {
     try {
         await pool.query(`START TRANSACTION`);
+        const encrypt_password = await bcrypt.hash(contraseña,10);
         const [result] = await pool.query(
             `UPDATE usuarios SET nombre=?, apellidos=?, domicilio=?, clave_electoral=?, contraseña=? WHERE id_usuario=?`,
-            [nombre, apellidos, domicilio, clave_electoral, contraseña, id_usuario]
+            [nombre, apellidos, domicilio, clave_electoral, encrypt_password, id_usuario]
         );
         await pool.query('COMMIT');
         return result;
@@ -340,28 +365,25 @@ export async function updateUsuario(id_usuario, nombre, apellidos, domicilio, cl
     }
 }
 
-export async function updateVehiculo(id_usuario, placa, no_serie, marca, modelo, color) {
+export async function updateVehiculo(id_usuario, placa, no_serie, marca, modelo, color, id_vehiculo) {
     try {
         const [result] = await pool.query(
-            `UPDATE vehiculo SET placa=?, no_serie=?, marca=?, modelo=?, color=? WHERE id_usuario=?`,
-            [placa, no_serie, marca, modelo, color, id_usuario]
+            `UPDATE vehiculo SET placa=?, no_serie=?, marca=?, modelo=?, color=? WHERE id_usuario=? AND id_vehiculo=?`,
+            [placa, no_serie, marca, modelo, color, id_usuario, id_vehiculo]
         );
         if(result){
             const [updatedVehiculo] = await pool.query(
-                `SELECT id_vehiculo FROM vehiculo WHERE id_usuario=?`,
-                [id_usuario]
+                `SELECT id_vehiculo FROM vehiculo WHERE id_usuario=? AND id_vehiculo=?`,
+                [id_usuario, id_vehiculo]
             );
             if (updatedVehiculo.length > 0) {
-                await pool.query('COMMIT');
                 return updatedVehiculo[0].id_vehiculo;
             } else {
-                await pool.query('ROLLBACK');
                 console.error("No se encontró ningún vehículo actualizado.");
                 return null;
             }
         }
     } catch (error) {
-        await pool.query('ROLLBACK');
         console.error("Error al actualizar vehículo:", error);
         return null;
     }
@@ -383,9 +405,12 @@ export async function updateQr(id_vehiculo, rutaCodigoQR) {
 //Login
 export async function LoginAdmins(clave_electoral, contrasena) {
     try {
-        const [rows] = await pool.query(`SELECT * FROM usuario_pri WHERE clave_electoral_pri=? AND contrasena=?`, [clave_electoral, contrasena]);
+        const [rows] = await pool.query(`SELECT * FROM usuario_pri WHERE clave_electoral_pri = ?`, [clave_electoral]);
         if (rows.length > 0) {
-            return rows[0];
+            const isCorrect = await bcrypt.compare(contrasena, rows[0].contrasena);
+            if (isCorrect) {
+                return rows[0];
+            }
         } else {
             return null;
         }
@@ -393,16 +418,36 @@ export async function LoginAdmins(clave_electoral, contrasena) {
         console.error(error);
     }
 }
+
 export async function LoginUsers(clave_electoral, contrasena) {
     try {
-        const [rows] = await pool.query(`SELECT usuarios.*, vehiculo.*, qr.*
-            FROM usuarios
-            JOIN vehiculo ON usuarios.id_usuario = vehiculo.id_usuario
-            JOIN qr ON vehiculo.id_vehiculo = qr.id_vehiculo
-            WHERE usuarios.clave_electoral = ? AND usuarios.contraseña = ?`,
-            [clave_electoral, contrasena]);
+        const [rows] = await pool.query(`
+        SELECT usuarios.*, vehiculo.*, qr.*
+        FROM usuarios
+        JOIN vehiculo ON usuarios.id_usuario = vehiculo.id_usuario
+        JOIN qr ON vehiculo.id_vehiculo = qr.id_vehiculo
+        WHERE usuarios.clave_electoral = ?`,
+            [clave_electoral]);
         if (rows.length > 0) {
-            return rows[0];
+            const isCorrect = await bcrypt.compare(contrasena, rows[0].contraseña);
+            if (isCorrect) {
+                const data = {
+                    nombre: rows[0].nombre.trim(),
+                    apellidos: rows[0].apellidos.trim(),
+                    domicilio: rows[0].domicilio.trim(),
+                    clave_electoral: rows[0].clave_electoral.trim(),
+                    foto: rows[0].foto.trim(),
+                    vehiculos: rows.map(vehiculo => ({
+                        placa: vehiculo.placa.trim(),
+                        no_serie: vehiculo.no_serie.trim(),
+                        marca: vehiculo.marca.trim(),
+                        modelo: vehiculo.modelo.trim(),
+                        color: vehiculo.color.trim(),
+                        qr: vehiculo.qr.trim(),
+                    }))
+                };
+                return data;
+            }
         } else {
             return null;
         }
@@ -410,6 +455,7 @@ export async function LoginUsers(clave_electoral, contrasena) {
         console.error(error);
     }
 }
+
 //Querys Historial
 export async function Hour_Register(id_usuario_p,id_qr,estado) {
     try {
@@ -439,7 +485,10 @@ export async function Hour_Entry(id_usuario_p,id_qr) {
 }
 export async function getHistory(){
     try{
-        const[row] = await pool.query(`SELECT * FROM historial`);
+        const[row] = await pool.query(`SELECT usuarios.clave_electoral,usuarios.nombre,usuarios.apellidos, vehiculo.placa, 
+        vehiculo.no_serie,historial.id_historial, historial.hora,historial.estado FROM usuarios JOIN vehiculo ON 
+        vehiculo.id_usuario = usuarios.id_usuario JOIN qr ON vehiculo.id_vehiculo = qr.id_vehiculo JOIN historial 
+        ON qr.id_qr = historial.id_qr;`);
         return row;
     } catch(error){
         console.error(error);
@@ -455,6 +504,41 @@ export async function Verify_Hour(id_qr){
             return null;
         }
     } catch(error){
+        console.error(error);
+    }
+}
+
+export async function getUser_Vehicles(id_usuario) {
+    try {
+        const [rows] = await pool.query(`
+        SELECT usuarios.*, vehiculo.*
+        FROM usuarios
+        JOIN vehiculo ON usuarios.id_usuario = vehiculo.id_usuario
+        WHERE usuarios.id_usuario = ?
+        `,
+        [id_usuario]);
+        
+        if (rows && rows.length > 0) {
+            const data = {
+                nombre: rows[0].nombre.trim(),
+                apellidos: rows[0].apellidos.trim(),
+                domicilio: rows[0].domicilio.trim(),
+                clave_electoral: rows[0].clave_electoral.trim(),
+                contrasena: rows[0].contraseña.trim(),
+                vehiculos: rows.map(vehiculo => ({
+                    id_vehiculo: vehiculo.id_vehiculo,
+                    placa: vehiculo.placa.trim(),
+                    no_serie: vehiculo.no_serie.trim(),
+                    marca: vehiculo.marca.trim(),
+                    modelo: vehiculo.modelo.trim(),
+                    color: vehiculo.color.trim(),
+                }))
+            };
+            return data;
+        } else {
+            return null;
+        }
+    } catch (error) {
         console.error(error);
     }
 }

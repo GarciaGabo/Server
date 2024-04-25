@@ -1,11 +1,13 @@
 import express from "express";
 import fs from "fs";
 import qr from "qrcode";
-import bcrypt from 'bcrypt';
+import multer from "multer";
+import path from "path";
 import {
     InsertAdmin,
     InsertUser,
     InsertVehicle,
+    InsertPhoto,
     deleteAdmins,
     deleteUsuarios,
     getAdmins,
@@ -33,6 +35,7 @@ import {
     deleteQr,
     getClaveAdminUnico,
     Verify_Hour,
+    getUser_Vehicles,
 } from "./database.js";
 import cors from 'cors';
 
@@ -44,22 +47,45 @@ const app = express();
 app.use(express.json());
 app.use(cors(corsOptions));
 app.use(express.static('imgs'));
+app.use(express.static('fotos'));
 
 app.listen(8080, () => {
     console.log('Server running');
 });
 
+const storage = multer.diskStorage({
+    destination: function (req, file, cb) {
+        cb(null, 'fotos/')
+    },
+    filename: function (req, file, cb) {
+        const imageName = file.originalname;
+        cb(null, imageName)
+    }
+})
+
+const upload = multer({ storage: storage }).single('imagen');
+
+app.post('/subir-imagen', upload, (req, res) => {
+    const imageName = req.file.originalname;
+    const insertFoto = InsertPhoto(imageName);
+    if(insertFoto){
+        res.status(201).send({ message: "Se han registrado correctamente" });
+    }
+});
+
 // Función para generar el código QR
-async function generarCodigoQR(datosUsuario) {
+async function generarCodigoQR(datosUsuario, datosVehiculo) {
     try {
-        const datosCodigoQR = `Nombre:${datosUsuario.nombre}\nApellidos:${datosUsuario.apellidos}\nDomicilio:${datosUsuario.domicilio}\nClave Electoral:${datosUsuario.clave_electoral}\nPlaca:${datosUsuario.placa}\nNo Serie:${datosUsuario.no_serie}\nMarca:${datosUsuario.marca}\nModelo:${datosUsuario.modelo}\nColor:${datosUsuario.color}`;
-        const rutaCodigoQR = `imgs/${datosUsuario.clave_electoral}.png`;
+        const datosCodigoQR = `Nombre:${datosUsuario.nombre}\nApellidos:${datosUsuario.apellidos}\nDomicilio:${datosUsuario.domicilio}\nClave Electoral:${datosUsuario.clave_electoral}\nPlaca:${datosVehiculo.placa}\nNo Serie:${datosVehiculo.no_serie}\nMarca:${datosVehiculo.marca}\nModelo:${datosVehiculo.modelo}\nColor:${datosVehiculo.color}`;
+        const rutaCodigoQR = `imgs/${datosUsuario.clave_electoral}_${datosVehiculo.placa}_${datosVehiculo.no_serie}.png`; // Modifica la ruta si deseas incluir información adicional en el nombre del archivo
         await qr.toFile(rutaCodigoQR, datosCodigoQR);
         return rutaCodigoQR;
     } catch (error) {
         console.error("Error al generar el código QR:", error);
+        console(error);
     }
 }
+
 // Ruta para servir la imagen
 app.get("/imagen/:nombreImagen", (req, res) => {
     const nombreImagen = req.params.nombreImagen;
@@ -67,50 +93,81 @@ app.get("/imagen/:nombreImagen", (req, res) => {
     res.sendFile(rutaImagen);
 });
 
+app.get("/foto/:nombreImagen", (req, res) => {
+    const nombreImagen = req.params.nombreImagen;
+    const rutaImagen = path.join(__dirname, "fotos", nombreImagen);
+
+    fs.access(rutaImagen, fs.constants.F_OK, (err) => {
+        if (err) {
+            res.status(404).send("File not found");
+        } else {
+            res.sendFile(rutaImagen);
+        }
+    });
+});
 
 // Registro de Usuarios
 app.post("/usuarios", async (req, res) => {
     try {
-        const { nombre, apellidos, domicilio, clave_electoral, contraseña, placa, no_serie, marca, modelo, color } = req.body;
+        const { nombre, apellidos, domicilio, clave_electoral, contraseña, vehiculos } = req.body;
+
         const claveExistente = await getClaveUsuario(clave_electoral);
         const claveExistentepri = await getClaveElectoral(clave_electoral);
         
         if (claveExistente || claveExistentepri) {
             return res.status(400).send({ message: "La clave electoral ya existe" });
-        } else if (await getPlaca(placa)) {
-            return res.status(400).send({ message: "La placa ya existe" });
-        } else if (await getNoSerie(no_serie)) {
-            return res.status(400).send({ message: "El número de serie ya existe" });
-        } else {
-            // Generar código QR
-            const rutaCodigoQR = await generarCodigoQR(req.body);
-            if(rutaCodigoQR){
-                const idUsuario = await InsertUser(nombre, apellidos, domicilio, clave_electoral, contraseña);
-                if(idUsuario){
-                    const idVehicle = await InsertVehicle(placa, no_serie, marca, modelo, color, idUsuario);
-                    if(idVehicle){
-                        const idQr = await InsertQr(idVehicle,rutaCodigoQR);
-                        if(idQr){
-                            res.status(201).send({ message: "Se ha registrado correctamente"});
-                        }
-                        else{
-                            res.status(400).send({ message: "Error al insertar el qr" });
-                        }
-                    }
-                    else{
-                        res.status(400).send({ message: "Error al insertar el vehiculo" });
-                    }
-                }
-                else{
-                    res.status(400).send({ message: "Error al insertar el usuario" });
-                }
+        }
+
+        const placasProcesadas = new Set();
+        const numerosSerieProcesados = new Set();
+
+        for (const vehiculo of vehiculos) {
+            const { placa, no_serie, marca, modelo, color } = vehiculo;
+
+            if (await getPlaca(placa)) {
+                return res.status(400).send({ message: "La placa ya existe" });
             }
-            else{
-                res.status(400).send({ message: "Ha ocurrido un error al generar el codigo qr" });
+
+            if (await getNoSerie(no_serie)) {
+                return res.status(400).send({ message: "El número de serie ya existe" });
+            }
+
+            if (placasProcesadas.has(placa)) {
+                return res.status(400).send({ message: "La placa coincide" });
+            } else {
+                placasProcesadas.add(placa);
+            }
+
+            if (numerosSerieProcesados.has(no_serie)) {
+                return res.status(400).send({ message: "El número de serie coincide" });
+            } else {
+                numerosSerieProcesados.add(no_serie);
             }
         }
+
+        const usuarioInsertado = await InsertUser(nombre, apellidos, domicilio, clave_electoral, contraseña);
+        if (!usuarioInsertado) {
+            return res.status(400).send({ message: "Error al insertar el usuario" });
+        }
+
+        for (const vehiculo of vehiculos) {
+            const { placa, no_serie, marca, modelo, color } = vehiculo;
+            const rutaCodigoQR = await generarCodigoQR(req.body, vehiculo);
+
+            const vehiculoInsertado = await InsertVehicle(placa, no_serie, marca, modelo, color, usuarioInsertado);
+            if (!vehiculoInsertado) {
+                return res.status(400).send({ message: "Error al insertar el vehículo" });
+            }
+
+            const qrInsertado = await InsertQr(vehiculoInsertado, rutaCodigoQR);
+            if (!qrInsertado) {
+                return res.status(400).send({ message: "Error al insertar el QR" });
+            }
+        }
+
+        res.status(201).send({ message: "Se han registrado correctamente" });
     } catch (error) {
-        res.status(500).send({message:"Error interno del servidor" + error});
+        res.status(500).send({ message: "Error interno del servidor" + error });
     }
 });
 
@@ -168,43 +225,71 @@ app.put("/UpdateAdmins", async (req,res)=>{
     }
 })
 //Modificacion de Usuarios
-app.put("/UpdateUsers", async (req,res)=>{
-    try{
-        const { id_usuario, nombre, apellidos, domicilio, clave_electoral, contraseña, placa, no_serie, marca, modelo, color } = req.body;
-        const getClave = await getClaveUsuarioUnico(id_usuario,clave_electoral);
-        const getClaveAdmin = await getClaveElectoral(clave_electoral);
-        const getplaca = await getPlacaUnico(id_usuario,placa);
-        const getNo_Serie = await getNoSerieUnico(id_usuario,no_serie);
-        if(getClave || getClaveAdmin){
-            res.status(500).send({message:'La clave electoral ya existe'});
+app.put("/UpdateUsers", async (req, res) => {
+    try {
+        const { id_usuario, nombre, apellidos, domicilio, clave_electoral, contrasena, vehiculos } = req.body;
+
+        const claveExistente = await getClaveUsuarioUnico(id_usuario,clave_electoral);
+        const claveExistentepri = await getClaveElectoral(clave_electoral);
+
+        if (claveExistente || claveExistentepri) {
+            return res.status(400).send({ message: "La clave electoral ya existe" });
         }
-        else if(getplaca){
-            res.status(500).send({message:'La placa ya existe'});
-        }
-        else if(getNo_Serie){
-            res.status(500).send({message:'El No Serie ya existe'});
-        }
-        else{
-            const userUpdate = await updateUsuario(id_usuario, nombre, apellidos, domicilio, clave_electoral, contraseña);
-            if(userUpdate){
-                const userVehicle = await updateVehiculo(id_usuario, placa, no_serie, marca, modelo, color);
-                if(userVehicle){
-                    const rutaCodigoQR = await generarCodigoQR(req.body);
-                    if(rutaCodigoQR){
-                        const qrUpdate = await updateQr(userVehicle, rutaCodigoQR);
-                        res.status(200).send({message:'Se ha actualizado correctamente'});
-                    }
-                    else{
-                        res.status(500).send({message:'No se ha actualizado correctamente'});
-                    }
-                }
+
+        const placasProcesadas = new Set();
+        const numerosSerieProcesados = new Set();
+
+        for (const vehiculo of vehiculos) {
+            const { placa, no_serie } = vehiculo;
+
+            if (await getPlacaUnico(id_usuario,placa)) {
+                return res.status(400).send({ message: "La placa ya existe" });
+            }
+
+            if (await getNoSerieUnico(id_usuario,no_serie)) {
+                return res.status(400).send({ message: "El número de serie ya existe" });
+            }
+
+            if (placasProcesadas.has(placa)) {
+                return res.status(400).send({ message: "La placa coincide" });
+            } else {
+                placasProcesadas.add(placa);
+            }
+
+            if (numerosSerieProcesados.has(no_serie)) {
+                return res.status(400).send({ message: "El número de serie coincide" });
+            } else {
+                numerosSerieProcesados.add(no_serie);
             }
         }
-    } catch(error){
-        console.error(error);
-        res.status(500).send({message:"No se ha actualizado"});
+
+        const usuarioActualizado = await updateUsuario(id_usuario, nombre, apellidos, domicilio, clave_electoral, contrasena);
+        if (!usuarioActualizado) {
+            return res.status(400).send({ message: "Error al actualizar el usuario" });
+        }
+
+        for (const vehiculo of vehiculos) {
+            const { id_vehiculo, placa, no_serie, marca, modelo, color } = vehiculo;
+            const rutaCodigoQR = await generarCodigoQR(req.body, vehiculo);
+
+            const vehiculoActualizado = await updateVehiculo(id_usuario, placa, no_serie, marca, modelo, color, id_vehiculo);
+
+            if (!vehiculoActualizado) {
+                return res.status(400).send({ message: "Error al actualizar el vehículo" });
+            }
+
+            const qrActualizado = await updateQr(vehiculoActualizado, rutaCodigoQR);
+            if (!qrActualizado) {
+                return res.status(400).send({ message: "Error al actualizar el QR" });
+            }
+        }
+
+        res.status(200).send({ message: "Se han actualizado correctamente" });
+    } catch (error) {
+        res.status(500).send({ message: "Error interno del servidor" + error });
     }
-})
+});
+
 //Obtencion de Usuarios
 app.get("/getUsuarios", async (req, res)=>{
     try{
@@ -213,7 +298,7 @@ app.get("/getUsuarios", async (req, res)=>{
     } catch(error){
         
     }
-})
+});
 //Eliminacion de usuarios
 app.delete("/deleteUsers/:id_usuario", async (req, res) => {
     try{
@@ -255,7 +340,7 @@ app.post('/Login', async (req, res)=>{
     } catch(error){
         res.status(500).send({message:'Error interno del servidor'});
     }
-})
+});
 app.post('/LoginUser', async (req, res)=>{
     try{
         const {clave_electoral, contrasena} = req.body;
@@ -309,4 +394,14 @@ app.get("/getHistory", async (req, res)=>{
     } catch(error){
         
     }
-})
+});
+
+app.get("/getUserVehicle/:id_usuario", async (req, res)=>{
+    try{
+        const { id_usuario } = req.params;
+        const result = await getUser_Vehicles(id_usuario);
+        res.status(200).send(result);
+    } catch(error){
+        
+    }
+});
